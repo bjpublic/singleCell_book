@@ -1,0 +1,86 @@
+name: 저자 저장소 동기화
+
+on:
+  schedule:
+    # 매월 1일 03:00 KST
+    - cron: '0 18 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 미러 저장소 받기
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: 원본 확인
+        id: check
+        run: |
+          git remote add upstream https://github.com/ybaeus/singleCell_book.git
+          git fetch upstream --prune
+          NEW=$(git rev-parse upstream/main)
+          OLD=$(cat .github/UPSTREAM_SHA 2>/dev/null || echo "none")
+          echo "new=$NEW" >> "$GITHUB_OUTPUT"
+          echo "old=$OLD" >> "$GITHUB_OUTPUT"
+          if [ "$OLD" = "$NEW" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "원본에 변경이 없습니다."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "원본 커밋: \`$NEW\`"
+              echo ""
+              if [ "$OLD" != "none" ]; then
+                echo "### 변경 내역"
+                echo ""
+                echo '```'
+                git log --oneline --no-merges "$OLD..$NEW" || true
+                echo '```'
+                echo ""
+                echo "### 변경 파일"
+                echo ""
+                echo '```'
+                git diff --stat "$OLD" "$NEW" || true
+                echo '```'
+              else
+                echo "첫 동기화입니다."
+              fi
+            } > /tmp/changes.md
+            cat /tmp/changes.md
+          fi
+
+      - name: 미러 갱신
+        if: steps.check.outputs.changed == 'true'
+        run: |
+          # 워크플로 폴더는 보존한 채 원본 내용으로 맞춘다
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          cp -r .github /tmp/keep-github
+          git reset --hard upstream/main
+          rm -rf .github
+          cp -r /tmp/keep-github .github
+          echo "${{ steps.check.outputs.new }}" > .github/UPSTREAM_SHA
+          git add -A .github
+          git commit -m "저자 저장소 동기화 (${{ steps.check.outputs.new }})"
+          git push --force origin main
+
+      - name: 변경 사항 이슈로 알림
+        if: steps.check.outputs.changed == 'true'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('/tmp/changes.md', 'utf8');
+            const today = new Date().toISOString().slice(0, 10);
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `저자 저장소 변경 반영 (${today})`,
+              body: body.slice(0, 60000)
+            });
